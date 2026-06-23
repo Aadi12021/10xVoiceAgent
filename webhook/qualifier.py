@@ -48,7 +48,7 @@ def _detect_segment(text: str) -> str:
     text_lower = text.lower()
     if any(re.search(p, text_lower) for p in _STUDENT_PATTERNS):
         return "student"
-    if re.search(r"\b(startup|scaleup|small business|smb|sme|main street|my business|our business|company|firm)\b", text_lower):
+    if re.search(r"\b(startup|scaleup|small business|smb|sme|main street|my business|our business|company|firm|founder|ceo|cto|coo|owner|business owner)\b", text_lower):
         return "business"
     if re.search(r"\b(corporate|enterprise|large org|team of \d|employees|headcount)\b", text_lower):
         return "corporate"
