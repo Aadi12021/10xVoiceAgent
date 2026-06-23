@@ -1,14 +1,22 @@
 import os
 import re
 import logging
-from twilio.rest import Client
 
 logger = logging.getLogger(__name__)
 
-twilio_client = Client(
-    os.environ.get("TWILIO_ACCOUNT_SID", ""),
-    os.environ.get("TWILIO_AUTH_TOKEN", ""),
-)
+# Lazily initialized on first use — avoids credential check at import time (which
+# would fail during test collection before conftest fixtures inject env vars).
+twilio_client = None
+
+
+def _init_client():
+    global twilio_client
+    if twilio_client is None:
+        from twilio.rest import Client
+        twilio_client = Client(
+            os.environ.get("TWILIO_ACCOUNT_SID", ""),
+            os.environ.get("TWILIO_AUTH_TOKEN", ""),
+        )
 
 
 def _normalize_phone(phone: str) -> str:
@@ -30,6 +38,10 @@ def send_booking_sms(phone_number: str) -> bool:
     if not normalized:
         logger.warning("Skipping SMS — invalid or empty phone number: %r", phone_number)
         return False
+
+    # Initialize client on first use; tests replace twilio_client via patch before this runs
+    _init_client()
+
     booking_url = os.environ.get("CALENDLY_BOOKING_URL", "")
     from_number = os.environ.get("TWILIO_FROM_NUMBER", "")  # read at call time
     sms_body = (
