@@ -1,7 +1,7 @@
 import re
 
 _WARM_LEAD_PATTERNS = [
-    (r"\b(founder|ceo|cto|coo|owner|executive|director|vp |vice president|team lead|manager)\b", "decision_maker"),
+    (r"\b(founder|ceo|cto|coo|owner|executive|director|vp|vice president|team lead|manager)\b", "decision_maker"),
     (r"\b(pain point|problem|challenge|struggle|issue|bottleneck|inefficien|manual process|repetitive|slow)\b", "pain_point"),
     (r"\b(pricing|price|cost|how much|what do you charge|budget|what.s the investment|enroll|sign up for)\b", "pricing_inquiry"),
     (r"\b(get started|how to start|ready to|want to begin|move forward|next step|how do i join)\b", "ready_to_start"),

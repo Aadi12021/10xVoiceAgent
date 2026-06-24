@@ -105,8 +105,10 @@ async def log_email_capture(call_id: str, email: str, purpose: str) -> None:
                 )
                 await asyncio.sleep(wait)
         except Exception as e:
-            logger.error("Failed to log email for call %s: %s", call_id, e)
-            return
+            logger.error("Failed to log email for call %s (attempt %d/4): %s", call_id, attempt + 1, e)
+            if attempt < 3:
+                await asyncio.sleep(3 * (attempt + 1))
+            continue
     logger.warning(
         "Email %s for call %s was not stored — Notion page not found after 4 attempts. "
         "Likely cause: end-of-call-report event never fired or failed to create the CRM record.",

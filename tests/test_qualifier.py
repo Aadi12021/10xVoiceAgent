@@ -102,3 +102,15 @@ def test_agent_newsletter_action_forces_newsletter():
     )
     assert result["is_newsletter"] is True
     assert result["is_warm_lead"] is False
+
+
+def test_vp_at_end_of_sentence_is_decision_maker():
+    """'VP' with no following word (end of sentence) must still trigger decision_maker signal.
+    Regression test for trailing-space bug in the regex: 'vp ' (with space) missed end-of-string VP.
+    """
+    result = qualify_call(
+        transcript="Caller: I am a VP. We need help automating our sales pipeline.",
+        summary="VP looking for sales automation."
+    )
+    assert result["is_warm_lead"] is True
+    assert "decision_maker" in result["qualification_signals"]

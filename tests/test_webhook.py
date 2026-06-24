@@ -94,6 +94,96 @@ def test_function_call_parameters_as_dict_also_works():
     assert "sent you a text" in resp.json()["result"].lower()
 
 
+def test_capture_email_newsletter_handler():
+    """capture_email with purpose=newsletter returns the 10X Briefs confirmation."""
+    payload = {
+        "message": {
+            "type": "function-call",
+            "functionCall": {
+                "name": "capture_email",
+                "parameters": {"email": "user@example.com", "purpose": "newsletter"},
+            },
+            "call": {"id": "call-email-test"},
+        }
+    }
+    with patch("webhook.crm.notion_client") as mock_notion:
+        mock_notion.databases.query = AsyncMock(return_value={"results": [{"id": "page-x"}]})
+        mock_notion.pages.update = AsyncMock(return_value={})
+        resp = client.post(
+            "/webhook",
+            json=payload,
+            headers={"x-vapi-secret": "testsecret"},
+        )
+    assert resp.status_code == 200
+    assert "10x briefs" in resp.json()["result"].lower()
+
+
+def test_send_booking_link_no_phone_returns_escalation():
+    """send_booking_link with no phone in params AND no call.customer returns graceful fallback."""
+    payload = {
+        "message": {
+            "type": "function-call",
+            "functionCall": {
+                "name": "send_booking_link",
+                "parameters": {},  # no phone_number key
+            },
+            # no customer number
+            "call": {"id": "call-no-phone"},
+        }
+    }
+    resp = client.post(
+        "/webhook",
+        json=payload,
+        headers={"x-vapi-secret": "testsecret"},
+    )
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert "hello" in result.lower() or "team" in result.lower()
+
+
+def test_malformed_json_parameters_handled_gracefully():
+    """Vapi sending malformed JSON in parameters must not cause a 500 error."""
+    payload = {
+        "message": {
+            "type": "function-call",
+            "functionCall": {
+                "name": "send_booking_link",
+                "parameters": "{bad json}",
+            },
+            "call": {"id": "call-bad-params", "customer": {"number": "+15550000001"}},
+        }
+    }
+    with patch("webhook.sms.twilio_client") as mock_twilio:
+        mock_twilio.messages.create.return_value = MagicMock(sid="SM_BAD")
+        resp = client.post(
+            "/webhook",
+            json=payload,
+            headers={"x-vapi-secret": "testsecret"},
+        )
+    # Falls back to call.customer.number — should still send SMS successfully
+    assert resp.status_code == 200
+    assert "sent you a text" in resp.json()["result"].lower()
+
+
+def test_unknown_function_name_returns_unknown():
+    payload = {
+        "message": {
+            "type": "function-call",
+            "functionCall": {
+                "name": "not_a_real_function",
+                "parameters": {},
+            },
+        }
+    }
+    resp = client.post(
+        "/webhook",
+        json=payload,
+        headers={"x-vapi-secret": "testsecret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["result"] == "Unknown function."
+
+
 def test_end_of_call_warm_lead_accepted():
     payload = {
         "message": {

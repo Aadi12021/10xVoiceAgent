@@ -79,6 +79,29 @@ async def test_log_email_capture_updates_existing_record():
     assert update_kwargs["properties"]["Email"]["email"] == "test@example.com"
 
 
+async def test_log_email_capture_retries_on_notion_api_error(caplog):
+    """A transient Notion API error during query must not silently drop the email.
+    The function must continue retrying, not give up after the first exception.
+    """
+    call_count = {"n": 0}
+
+    async def mock_query(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise Exception("Notion 503 transient error")
+        return {"results": [{"id": "page-recovered"}]}
+
+    with patch("webhook.crm.notion_client") as mock_notion, \
+         patch("asyncio.sleep", new=AsyncMock()):
+        mock_notion.databases.query = AsyncMock(side_effect=mock_query)
+        mock_notion.pages.update = AsyncMock(return_value={})
+        from webhook.crm import log_email_capture
+        await log_email_capture("call-transient", "transient@example.com", "newsletter")
+
+    mock_notion.pages.update.assert_called_once()
+    assert call_count["n"] == 2  # first attempt errored, second succeeded
+
+
 async def test_log_email_capture_retries_until_page_exists():
     """Race condition: email capture fires during the call, before end-of-call-report creates the page.
     The function must retry rather than silently dropping the email."""

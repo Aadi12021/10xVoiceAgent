@@ -33,7 +33,11 @@ def _verify_secret(request: Request) -> None:
 def _parse_fn_params(raw: Any) -> dict:
     """Vapi sends function parameters as a JSON string or a parsed dict — handle both."""
     if isinstance(raw, str):
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Malformed function parameters (not valid JSON): %r", raw)
+            return {}
     if isinstance(raw, dict):
         return raw
     return {}
