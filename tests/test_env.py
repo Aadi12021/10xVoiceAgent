@@ -12,10 +12,11 @@ def test_required_env_vars_present():
         "TWILIO_ACCOUNT_SID",
         "TWILIO_AUTH_TOKEN",
         "TWILIO_FROM_NUMBER",
-        "NOTION_TOKEN",
-        "NOTION_DATABASE_ID",
-        "SENDGRID_API_KEY",
-        "CALENDLY_BOOKING_URL",
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "GOOGLE_SHEET_ID",
+        "GMAIL_USER",
+        "GMAIL_APP_PASSWORD",
+        "BOOKING_URL",
         "WEBHOOK_SECRET",
     ]
     missing = [v for v in required if not os.getenv(v)]

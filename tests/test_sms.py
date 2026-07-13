@@ -12,7 +12,7 @@ def test_send_returns_true_on_success():
     assert result is True
     # Verify the body uses the env var value set in conftest.py
     call_kwargs = mock_client.messages.create.call_args.kwargs
-    assert "https://calendly.com/test/strategy-call" in call_kwargs["body"]
+    assert "https://calendar.google.com/test/booking" in call_kwargs["body"]
     assert call_kwargs["to"] == "+15551234567"
     assert call_kwargs["from_"] == "+15550001111"
 
@@ -30,15 +30,15 @@ def test_send_returns_false_for_empty_number():
 
 
 def test_sms_body_reads_env_var_at_call_time(monkeypatch):
-    """If CALENDLY_BOOKING_URL changes between imports and calls, the SMS uses the current value."""
-    monkeypatch.setenv("CALENDLY_BOOKING_URL", "https://calendly.com/override/link")
+    """If BOOKING_URL changes between imports and calls, the SMS uses the current value."""
+    monkeypatch.setenv("BOOKING_URL", "https://calendar.google.com/override/link")
     mock_msg = MagicMock()
     mock_msg.sid = "SM999"
     with patch("webhook.sms.twilio_client") as mock_client:
         mock_client.messages.create.return_value = mock_msg
         send_booking_sms("+15550000000")
     body = mock_client.messages.create.call_args.kwargs["body"]
-    assert "https://calendly.com/override/link" in body
+    assert "https://calendar.google.com/override/link" in body
 
 
 def test_10_digit_number_normalized_to_e164():

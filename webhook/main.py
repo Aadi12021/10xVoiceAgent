@@ -113,13 +113,13 @@ async def _handle_function_call(msg: VapiMessage) -> dict:
 
 async def _process_end_of_call(msg: VapiMessage) -> None:
     from webhook.qualifier import qualify_call
-    from webhook.crm import log_call_to_notion
+    from webhook.crm import log_call_to_sheets
     from webhook.notifications import notify_warm_lead
 
     qualification = qualify_call(
         transcript=msg.transcript or "",
         summary=msg.summary or "",
     )
-    await log_call_to_notion(msg, qualification)
+    await log_call_to_sheets(msg, qualification)
     if qualification["is_warm_lead"]:
         await notify_warm_lead(msg, qualification)

@@ -1,16 +1,42 @@
 import asyncio
+import json
 import os
 import logging
-from notion_client import AsyncClient
 from webhook.models import VapiMessage
 
 logger = logging.getLogger(__name__)
 
-notion_client = AsyncClient(auth=os.environ.get("NOTION_TOKEN", ""))
-_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
+# Lazy init — avoids credential error at import time before env vars are injected in tests
+_sheets_client = None
 
-_MAX_TRANSCRIPT_CHARS = 6000   # 3 chunks × 2000 chars (Notion rich_text limit per block)
-_CHUNK_SIZE = 2000
+_HEADERS = [
+    "Call ID", "Call Date", "Phone", "Email",
+    "Qualification", "Segment", "Summary",
+    "Transcript", "Recording URL", "Ended Reason",
+]
+_COL_CALL_ID = 1   # A
+_COL_EMAIL   = 4   # D  (must match _HEADERS order above)
+
+_MAX_TRANSCRIPT_CHARS = 5000  # Google Sheets cell limit is ~50k chars, but keep it readable
+
+
+def _init_client():
+    global _sheets_client
+    if _sheets_client is None:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "{}")
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        _sheets_client = gspread.authorize(creds)
+
+
+def _get_worksheet():
+    _init_client()
+    sheet = _sheets_client.open_by_key(os.environ.get("GOOGLE_SHEET_ID", ""))
+    return sheet.sheet1
 
 
 def _qualification_label(q: dict) -> str:
@@ -21,23 +47,7 @@ def _qualification_label(q: dict) -> str:
     return "Unqualified"
 
 
-def _rich_text(value: str) -> list:
-    """Split text into 2000-char blocks. Notion rejects text objects longer than 2000 chars."""
-    value = (value or "")[:_MAX_TRANSCRIPT_CHARS]
-    if not value:
-        return [{"text": {"content": ""}}]
-    return [
-        {"text": {"content": value[i:i + _CHUNK_SIZE]}}
-        for i in range(0, len(value), _CHUNK_SIZE)
-    ]
-
-
-def _short_text(value: str) -> list:
-    """Single-block rich_text for short fields (summary, ended reason, call ID)."""
-    return [{"text": {"content": (value or "")[:2000]}}]
-
-
-async def log_call_to_notion(msg: VapiMessage, qualification: dict) -> None:
+def _append_row_sync(msg: VapiMessage, qualification: dict) -> None:
     phone = call_id = call_date = ""
     if msg.call:
         call_id = msg.call.id or ""
@@ -45,62 +55,62 @@ async def log_call_to_notion(msg: VapiMessage, qualification: dict) -> None:
         if msg.call.customer:
             phone = msg.call.customer.number or ""
 
-    properties = {
-        "Name": {"title": _short_text(f"Call — {call_date or 'unknown'} — {phone or 'unknown'}")},
-        "Phone": {"phone_number": phone or None},
-        "Email": {"email": None},
-        "Call Date": {"date": {"start": call_date}} if call_date else {"date": None},
-        "Qualification": {"select": {"name": _qualification_label(qualification)}},
-        "Segment": {"select": {"name": qualification.get("segment", "unknown")}},
-        "Summary": {"rich_text": _short_text(msg.summary or "")},
-        "Transcript": {"rich_text": _rich_text(msg.transcript or "")},
-        "Recording URL": {"url": msg.recordingUrl or None},
-        "Ended Reason": {"rich_text": _short_text(msg.endedReason or "")},
-        "Call ID": {"rich_text": _short_text(call_id)},
-    }
+    row = [
+        call_id,
+        call_date,
+        phone,
+        "",  # Email — populated later by log_email_capture
+        _qualification_label(qualification),
+        qualification.get("segment", "unknown"),
+        (msg.summary or "")[:500],
+        (msg.transcript or "")[:_MAX_TRANSCRIPT_CHARS],
+        msg.recordingUrl or "",
+        msg.endedReason or "",
+    ]
+    ws = _get_worksheet()
+    ws.append_row(row, value_input_option="USER_ENTERED")
 
+
+def _find_and_update_email_sync(call_id: str, email: str) -> bool:
+    """Find the row with this call_id and write the email. Returns True if found."""
+    import gspread.exceptions
+    ws = _get_worksheet()
     try:
-        await notion_client.pages.create(
-            parent={"database_id": _DATABASE_ID},
-            properties=properties,
-        )
-        logger.info("Call %s logged to Notion", call_id)
+        cell = ws.find(call_id, in_column=_COL_CALL_ID)
+        ws.update_cell(cell.row, _COL_EMAIL, email)
+        return True
+    except Exception as exc:
+        if "CellNotFound" in type(exc).__name__ or "not found" in str(exc).lower():
+            return False
+        raise
+
+
+async def log_call_to_sheets(msg: VapiMessage, qualification: dict) -> None:
+    try:
+        await asyncio.to_thread(_append_row_sync, msg, qualification)
+        logger.info("Call %s logged to Google Sheets", msg.call.id if msg.call else "unknown")
     except Exception as e:
-        logger.error("Failed to log call %s to Notion: %s", call_id, e)
+        logger.error("Failed to log call to Google Sheets: %s", e)
 
 
 async def log_email_capture(call_id: str, email: str, purpose: str) -> None:
-    """Find the Notion page for this call_id and add the email address to it.
+    """Write the caller's email into the row for this call_id.
 
-    Retries up to 4 times with linear backoff (3s, 6s, 9s gaps) because this function
-    fires during the call (from the capture_email function-call event), while the Notion
-    page is not created until end-of-call-report fires after the call ends. Without retry,
-    the page may not exist yet and the email is silently lost.
+    Retries up to 4 times with linear backoff because capture_email fires during the call
+    while the row isn't written until end-of-call-report fires after hang-up.
     """
     if not email:
         return
     for attempt in range(4):
         try:
-            results = await notion_client.databases.query(
-                database_id=_DATABASE_ID,
-                filter={
-                    "property": "Call ID",
-                    "rich_text": {"equals": call_id},
-                },
-            )
-            pages = results.get("results", [])
-            if pages:
-                page_id = pages[0]["id"]
-                await notion_client.pages.update(
-                    page_id=page_id,
-                    properties={"Email": {"email": email}},
-                )
+            found = await asyncio.to_thread(_find_and_update_email_sync, call_id, email)
+            if found:
                 logger.info("Email %s captured for call %s (purpose: %s)", email, call_id, purpose)
                 return
             if attempt < 3:
-                wait = 3 * (attempt + 1)  # 3s, 6s, 9s
+                wait = 3 * (attempt + 1)
                 logger.debug(
-                    "Notion page not found for call %s — retrying in %ds (attempt %d/4)",
+                    "Row not found for call %s — retrying in %ds (attempt %d/4)",
                     call_id, wait, attempt + 1,
                 )
                 await asyncio.sleep(wait)
@@ -110,7 +120,6 @@ async def log_email_capture(call_id: str, email: str, purpose: str) -> None:
                 await asyncio.sleep(3 * (attempt + 1))
             continue
     logger.warning(
-        "Email %s for call %s was not stored — Notion page not found after 4 attempts. "
-        "Likely cause: end-of-call-report event never fired or failed to create the CRM record.",
+        "Email %s for call %s was not stored after 4 attempts — row may not exist yet.",
         email, call_id,
     )

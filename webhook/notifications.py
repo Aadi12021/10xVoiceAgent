@@ -1,15 +1,13 @@
+import asyncio
 import os
 import logging
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, To
+import smtplib
+from email.mime.text import MIMEText
 from webhook.models import VapiMessage
 
 logger = logging.getLogger(__name__)
 
-sendgrid_client = SendGridAPIClient(api_key=os.environ.get("SENDGRID_API_KEY", ""))
-
 _NOTIFY_EMAIL = "hello@10xaistudio.com"
-_FROM_EMAIL = "hello@10xaistudio.com"
 
 
 def _build_body(msg: VapiMessage, qualification: dict) -> str:
@@ -33,6 +31,20 @@ def _build_body(msg: VapiMessage, qualification: dict) -> str:
     )
 
 
+def _send_gmail_sync(subject: str, body: str, phone: str) -> None:
+    gmail_user = os.environ.get("GMAIL_USER", "")
+    gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = gmail_user
+    msg["To"] = _NOTIFY_EMAIL
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(gmail_user, gmail_password)
+        smtp.send_message(msg)
+
+
 async def notify_warm_lead(msg: VapiMessage, qualification: dict) -> None:
     phone = ""
     if msg.call and msg.call.customer:
@@ -40,14 +52,8 @@ async def notify_warm_lead(msg: VapiMessage, qualification: dict) -> None:
 
     subject = f"Warm Lead: {phone or 'Unknown'} — Strategy Call Opportunity"
     body = _build_body(msg, qualification)
-    email = Mail(
-        from_email=_FROM_EMAIL,
-        to_emails=To(_NOTIFY_EMAIL),
-        subject=subject,
-        plain_text_content=body,
-    )
     try:
-        resp = sendgrid_client.send(email)
-        logger.info("Lead notification sent (status %s) for %s", resp.status_code, phone)
+        await asyncio.to_thread(_send_gmail_sync, subject, body, phone)
+        logger.info("Lead notification sent for %s", phone)
     except Exception as e:
         logger.error("Failed to send lead notification for %s: %s", phone, e)

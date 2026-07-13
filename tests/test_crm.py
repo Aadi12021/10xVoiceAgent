@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from webhook.models import VapiMessage, CallInfo, Customer
 
 SAMPLE_MSG = VapiMessage(
@@ -24,103 +24,110 @@ SAMPLE_Q = {
 }
 
 
-async def test_log_call_creates_notion_page():
-    with patch("webhook.crm.notion_client") as mock_notion:
-        mock_notion.pages.create = AsyncMock(return_value={"id": "page-123"})
-        from webhook.crm import log_call_to_notion
-        await log_call_to_notion(SAMPLE_MSG, SAMPLE_Q)
-
-    mock_notion.pages.create.assert_called_once()
-    props = mock_notion.pages.create.call_args.kwargs["properties"]
-    assert props["Qualification"]["select"]["name"] == "Warm Lead"
-    assert props["Segment"]["select"]["name"] == "business"
-    assert props["Call ID"]["rich_text"][0]["text"]["content"] == "call-abc-123"
+def _mock_worksheet():
+    ws = MagicMock()
+    ws.append_row = MagicMock()
+    ws.find = MagicMock()
+    ws.update_cell = MagicMock()
+    return ws
 
 
-async def test_log_call_handles_notion_error_without_raising(caplog):
-    with patch("webhook.crm.notion_client") as mock_notion:
-        mock_notion.pages.create = AsyncMock(side_effect=Exception("Notion down"))
-        from webhook.crm import log_call_to_notion
-        await log_call_to_notion(SAMPLE_MSG, SAMPLE_Q)
+async def test_log_call_appends_row_to_sheet():
+    ws = _mock_worksheet()
+    with patch("webhook.crm._get_worksheet", return_value=ws):
+        from webhook.crm import log_call_to_sheets
+        await log_call_to_sheets(SAMPLE_MSG, SAMPLE_Q)
+
+    ws.append_row.assert_called_once()
+    row = ws.append_row.call_args.args[0]
+    assert row[0] == "call-abc-123"       # Call ID
+    assert row[4] == "Warm Lead"           # Qualification
+    assert row[5] == "business"            # Segment
+    assert row[2] == "+15551234567"        # Phone
+
+
+async def test_log_call_handles_sheets_error_without_raising(caplog):
+    with patch("webhook.crm._get_worksheet", side_effect=Exception("Sheets down")):
+        from webhook.crm import log_call_to_sheets
+        await log_call_to_sheets(SAMPLE_MSG, SAMPLE_Q)
     assert "Failed to log call" in caplog.text
 
 
-async def test_transcript_longer_than_2000_chars_is_chunked():
-    long_transcript = "Caller: " + ("word " * 500)  # ~2500 chars
+async def test_transcript_truncated_to_max_chars():
+    long_transcript = "word " * 1200  # 6000 chars
     msg = VapiMessage(
         type="end-of-call-report",
         call=CallInfo(id="call-long"),
         transcript=long_transcript,
         summary="Long call.",
     )
-    with patch("webhook.crm.notion_client") as mock_notion:
-        mock_notion.pages.create = AsyncMock(return_value={"id": "page-long"})
-        from webhook.crm import log_call_to_notion
-        await log_call_to_notion(msg, SAMPLE_Q)
+    ws = _mock_worksheet()
+    with patch("webhook.crm._get_worksheet", return_value=ws):
+        from webhook.crm import log_call_to_sheets
+        await log_call_to_sheets(msg, SAMPLE_Q)
 
-    props = mock_notion.pages.create.call_args.kwargs["properties"]
-    transcript_blocks = props["Transcript"]["rich_text"]
-    assert len(transcript_blocks) > 1, "Long transcript should be split into multiple text blocks"
-    full_text = "".join(b["text"]["content"] for b in transcript_blocks)
-    assert len(full_text) == min(len(long_transcript), 6000)
+    row = ws.append_row.call_args.args[0]
+    transcript_cell = row[7]  # Transcript column
+    assert len(transcript_cell) <= 5000
 
 
-async def test_log_email_capture_updates_existing_record():
-    with patch("webhook.crm.notion_client") as mock_notion:
-        mock_notion.databases.query = AsyncMock(return_value={
-            "results": [{"id": "page-abc-123"}]
-        })
-        mock_notion.pages.update = AsyncMock(return_value={"id": "page-abc-123"})
+async def test_log_email_capture_updates_existing_row():
+    ws = _mock_worksheet()
+    cell = MagicMock()
+    cell.row = 3
+    ws.find.return_value = cell
+
+    with patch("webhook.crm._get_worksheet", return_value=ws):
         from webhook.crm import log_email_capture
         await log_email_capture("call-abc-123", "test@example.com", "newsletter")
 
-    mock_notion.pages.update.assert_called_once()
-    update_kwargs = mock_notion.pages.update.call_args.kwargs
-    assert update_kwargs["properties"]["Email"]["email"] == "test@example.com"
+    ws.find.assert_called_once_with("call-abc-123", in_column=1)
+    ws.update_cell.assert_called_once_with(3, 4, "test@example.com")
 
 
-async def test_log_email_capture_retries_on_notion_api_error(caplog):
-    """A transient Notion API error during query must not silently drop the email.
-    The function must continue retrying, not give up after the first exception.
-    """
+async def test_log_email_capture_retries_until_row_exists():
+    """Race condition: email capture fires before end-of-call-report writes the row."""
     call_count = {"n": 0}
+    cell = MagicMock()
+    cell.row = 5
 
-    async def mock_query(**kwargs):
+    def mock_find(value, in_column):
         call_count["n"] += 1
         if call_count["n"] < 2:
-            raise Exception("Notion 503 transient error")
-        return {"results": [{"id": "page-recovered"}]}
+            raise Exception("CellNotFound")
+        return cell
 
-    with patch("webhook.crm.notion_client") as mock_notion, \
+    ws = _mock_worksheet()
+    ws.find.side_effect = mock_find
+
+    with patch("webhook.crm._get_worksheet", return_value=ws), \
          patch("asyncio.sleep", new=AsyncMock()):
-        mock_notion.databases.query = AsyncMock(side_effect=mock_query)
-        mock_notion.pages.update = AsyncMock(return_value={})
-        from webhook.crm import log_email_capture
-        await log_email_capture("call-transient", "transient@example.com", "newsletter")
-
-    mock_notion.pages.update.assert_called_once()
-    assert call_count["n"] == 2  # first attempt errored, second succeeded
-
-
-async def test_log_email_capture_retries_until_page_exists():
-    """Race condition: email capture fires during the call, before end-of-call-report creates the page.
-    The function must retry rather than silently dropping the email."""
-    call_count = {"n": 0}
-
-    async def mock_query(**kwargs):
-        call_count["n"] += 1
-        if call_count["n"] < 2:
-            return {"results": []}  # first attempt: page not yet created
-        return {"results": [{"id": "page-race"}]}
-
-    with patch("webhook.crm.notion_client") as mock_notion, \
-         patch("asyncio.sleep", new=AsyncMock()):  # don't actually sleep in tests
-        mock_notion.databases.query = AsyncMock(side_effect=mock_query)
-        mock_notion.pages.update = AsyncMock(return_value={"id": "page-race"})
         from webhook.crm import log_email_capture
         await log_email_capture("call-race", "retry@example.com", "newsletter")
 
-    mock_notion.pages.update.assert_called_once()
-    update_kwargs = mock_notion.pages.update.call_args.kwargs
-    assert update_kwargs["properties"]["Email"]["email"] == "retry@example.com"
-    assert call_count["n"] == 2  # first attempt missed, second found the page
+    ws.update_cell.assert_called_once_with(5, 4, "retry@example.com")
+    assert call_count["n"] == 2
+
+
+async def test_log_email_capture_retries_on_sheets_api_error(caplog):
+    """Transient API error must not silently drop the email — must continue retrying."""
+    call_count = {"n": 0}
+    cell = MagicMock()
+    cell.row = 7
+
+    def mock_find(value, in_column):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise Exception("503 Service Unavailable")
+        return cell
+
+    ws = _mock_worksheet()
+    ws.find.side_effect = mock_find
+
+    with patch("webhook.crm._get_worksheet", return_value=ws), \
+         patch("asyncio.sleep", new=AsyncMock()):
+        from webhook.crm import log_email_capture
+        await log_email_capture("call-transient", "transient@example.com", "newsletter")
+
+    ws.update_cell.assert_called_once_with(7, 4, "transient@example.com")
+    assert call_count["n"] == 2

@@ -1,3 +1,4 @@
+import base64
 import pytest
 from unittest.mock import patch, MagicMock
 from webhook.models import VapiMessage, CallInfo, Customer
@@ -21,32 +22,45 @@ SAMPLE_Q = {
 }
 
 
-async def test_notify_warm_lead_calls_sendgrid():
-    with patch("webhook.notifications.sendgrid_client") as mock_sg:
-        mock_sg.send.return_value = MagicMock(status_code=202)
-        from webhook.notifications import notify_warm_lead
-        await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
-    mock_sg.send.assert_called_once()
-    mail = mock_sg.send.call_args.args[0]
-    # SendGrid wraps subject and content in helper types — unwrap for assertions
-    assert "Warm Lead" in str(mail.subject)
-    assert "+15559876543" in mail.contents[0].content
+async def test_notify_warm_lead_sends_gmail():
+    mock_smtp = MagicMock()
+    with patch("smtplib.SMTP_SSL", return_value=mock_smtp.__enter__.return_value):
+        mock_smtp.__enter__ = MagicMock(return_value=mock_smtp)
+        mock_smtp.__exit__ = MagicMock(return_value=False)
+        with patch("smtplib.SMTP_SSL") as mock_ssl:
+            mock_ssl.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+            mock_ssl.return_value.__exit__ = MagicMock(return_value=False)
+            from webhook.notifications import notify_warm_lead
+            await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
+
+    mock_smtp.login.assert_called_once_with("hello@10xaistudio.com", "test-app-password")
+    mock_smtp.send_message.assert_called_once()
+    sent_msg = mock_smtp.send_message.call_args.args[0]
+    assert "Warm Lead" in sent_msg["Subject"]
+    assert "+15559876543" in sent_msg["Subject"]
 
 
-async def test_notify_handles_sendgrid_error_without_raising(caplog):
-    with patch("webhook.notifications.sendgrid_client") as mock_sg:
-        mock_sg.send.side_effect = Exception("SendGrid down")
+async def test_notify_handles_smtp_error_without_raising(caplog):
+    with patch("smtplib.SMTP_SSL", side_effect=Exception("Connection refused")):
         from webhook.notifications import notify_warm_lead
         await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
     assert "Failed to send" in caplog.text
 
 
 async def test_notify_includes_qualification_signals():
-    with patch("webhook.notifications.sendgrid_client") as mock_sg:
-        mock_sg.send.return_value = MagicMock(status_code=202)
+    mock_smtp = MagicMock()
+    with patch("smtplib.SMTP_SSL") as mock_ssl:
+        mock_ssl.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+        mock_ssl.return_value.__exit__ = MagicMock(return_value=False)
         from webhook.notifications import notify_warm_lead
         await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
-    mail = mock_sg.send.call_args.args[0]
-    body = mail.contents[0].content
+
+    sent_msg = mock_smtp.send_message.call_args.args[0]
+    raw = sent_msg.get_payload()
+    # MIMEText may base64-encode the body; decode if needed
+    try:
+        body = base64.b64decode(raw).decode()
+    except Exception:
+        body = raw
     assert "decision_maker" in body
     assert "timeline" in body

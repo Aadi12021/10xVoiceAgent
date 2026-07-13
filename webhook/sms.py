@@ -42,7 +42,7 @@ def send_booking_sms(phone_number: str) -> bool:
     # Initialize client on first use; tests replace twilio_client via patch before this runs
     _init_client()
 
-    booking_url = os.environ.get("CALENDLY_BOOKING_URL", "")
+    booking_url = os.environ.get("BOOKING_URL", "")
     from_number = os.environ.get("TWILIO_FROM_NUMBER", "")  # read at call time
     sms_body = (
         f"Hi! Here's your link to book a free 30-minute strategy call with "

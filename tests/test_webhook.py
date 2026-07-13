@@ -106,9 +106,11 @@ def test_capture_email_newsletter_handler():
             "call": {"id": "call-email-test"},
         }
     }
-    with patch("webhook.crm.notion_client") as mock_notion:
-        mock_notion.databases.query = AsyncMock(return_value={"results": [{"id": "page-x"}]})
-        mock_notion.pages.update = AsyncMock(return_value={})
+    mock_ws = MagicMock()
+    cell = MagicMock()
+    cell.row = 2
+    mock_ws.find.return_value = cell
+    with patch("webhook.crm._get_worksheet", return_value=mock_ws):
         resp = client.post(
             "/webhook",
             json=payload,
@@ -198,10 +200,12 @@ def test_end_of_call_warm_lead_accepted():
             "summary": "Startup founder with manual sales process, wants AI automation.",
         }
     }
-    with patch("webhook.crm.notion_client") as mock_notion, \
-         patch("webhook.notifications.sendgrid_client") as mock_sg:
-        mock_notion.pages.create = AsyncMock(return_value={"id": "page-new"})
-        mock_sg.send.return_value = MagicMock(status_code=202)
+    mock_ws = MagicMock()
+    mock_ws.append_row = MagicMock()
+    with patch("webhook.crm._get_worksheet", return_value=mock_ws), \
+         patch("smtplib.SMTP_SSL") as mock_ssl:
+        mock_ssl.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        mock_ssl.return_value.__exit__ = MagicMock(return_value=False)
         resp = client.post(
             "/webhook",
             json=payload,
