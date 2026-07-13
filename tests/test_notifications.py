@@ -22,16 +22,19 @@ SAMPLE_Q = {
 }
 
 
-async def test_notify_warm_lead_sends_gmail():
+def _smtp_mock():
     mock_smtp = MagicMock()
-    with patch("smtplib.SMTP_SSL", return_value=mock_smtp.__enter__.return_value):
-        mock_smtp.__enter__ = MagicMock(return_value=mock_smtp)
-        mock_smtp.__exit__ = MagicMock(return_value=False)
-        with patch("smtplib.SMTP_SSL") as mock_ssl:
-            mock_ssl.return_value.__enter__ = MagicMock(return_value=mock_smtp)
-            mock_ssl.return_value.__exit__ = MagicMock(return_value=False)
-            from webhook.notifications import notify_warm_lead
-            await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
+    mock_ssl = MagicMock()
+    mock_ssl.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+    mock_ssl.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_ssl, mock_smtp
+
+
+async def test_notify_warm_lead_sends_gmail():
+    mock_ssl, mock_smtp = _smtp_mock()
+    with patch("smtplib.SMTP_SSL", mock_ssl):
+        from webhook.notifications import notify_warm_lead
+        await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
 
     mock_smtp.login.assert_called_once_with("hello@10xaistudio.com", "test-app-password")
     mock_smtp.send_message.assert_called_once()
@@ -48,16 +51,13 @@ async def test_notify_handles_smtp_error_without_raising(caplog):
 
 
 async def test_notify_includes_qualification_signals():
-    mock_smtp = MagicMock()
-    with patch("smtplib.SMTP_SSL") as mock_ssl:
-        mock_ssl.return_value.__enter__ = MagicMock(return_value=mock_smtp)
-        mock_ssl.return_value.__exit__ = MagicMock(return_value=False)
+    mock_ssl, mock_smtp = _smtp_mock()
+    with patch("smtplib.SMTP_SSL", mock_ssl):
         from webhook.notifications import notify_warm_lead
         await notify_warm_lead(SAMPLE_MSG, SAMPLE_Q)
 
     sent_msg = mock_smtp.send_message.call_args.args[0]
     raw = sent_msg.get_payload()
-    # MIMEText may base64-encode the body; decode if needed
     try:
         body = base64.b64decode(raw).decode()
     except Exception:

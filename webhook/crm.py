@@ -72,17 +72,16 @@ def _append_row_sync(msg: VapiMessage, qualification: dict) -> None:
 
 
 def _find_and_update_email_sync(call_id: str, email: str) -> bool:
-    """Find the row with this call_id and write the email. Returns True if found."""
-    import gspread.exceptions
+    """Find the row with this call_id and write the email. Returns True if found.
+
+    gspread v6: find() returns None when not found (does not raise CellNotFound).
+    """
     ws = _get_worksheet()
-    try:
-        cell = ws.find(call_id, in_column=_COL_CALL_ID)
-        ws.update_cell(cell.row, _COL_EMAIL, email)
-        return True
-    except Exception as exc:
-        if "CellNotFound" in type(exc).__name__ or "not found" in str(exc).lower():
-            return False
-        raise
+    cell = ws.find(call_id, in_column=_COL_CALL_ID)
+    if cell is None:
+        return False
+    ws.update_cell(cell.row, _COL_EMAIL, email)
+    return True
 
 
 async def log_call_to_sheets(msg: VapiMessage, qualification: dict) -> None:
@@ -100,6 +99,9 @@ async def log_email_capture(call_id: str, email: str, purpose: str) -> None:
     while the row isn't written until end-of-call-report fires after hang-up.
     """
     if not email:
+        return
+    if not call_id:
+        logger.warning("Cannot store email %s — call_id is empty (web widget session?)", email)
         return
     for attempt in range(4):
         try:

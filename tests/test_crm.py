@@ -27,7 +27,7 @@ SAMPLE_Q = {
 def _mock_worksheet():
     ws = MagicMock()
     ws.append_row = MagicMock()
-    ws.find = MagicMock()
+    ws.find = MagicMock(return_value=None)  # gspread v6: find() returns None when not found
     ws.update_cell = MagicMock()
     return ws
 
@@ -67,15 +67,14 @@ async def test_transcript_truncated_to_max_chars():
         await log_call_to_sheets(msg, SAMPLE_Q)
 
     row = ws.append_row.call_args.args[0]
-    transcript_cell = row[7]  # Transcript column
-    assert len(transcript_cell) <= 5000
+    assert len(row[7]) <= 5000  # Transcript column
 
 
 async def test_log_email_capture_updates_existing_row():
     ws = _mock_worksheet()
     cell = MagicMock()
     cell.row = 3
-    ws.find.return_value = cell
+    ws.find.return_value = cell  # gspread v6: returns Cell when found
 
     with patch("webhook.crm._get_worksheet", return_value=ws):
         from webhook.crm import log_email_capture
@@ -86,7 +85,9 @@ async def test_log_email_capture_updates_existing_row():
 
 
 async def test_log_email_capture_retries_until_row_exists():
-    """Race condition: email capture fires before end-of-call-report writes the row."""
+    """Race condition: email capture fires before end-of-call-report writes the row.
+    gspread v6: find() returns None when not found (not raises).
+    """
     call_count = {"n": 0}
     cell = MagicMock()
     cell.row = 5
@@ -94,7 +95,7 @@ async def test_log_email_capture_retries_until_row_exists():
     def mock_find(value, in_column):
         call_count["n"] += 1
         if call_count["n"] < 2:
-            raise Exception("CellNotFound")
+            return None  # gspread v6: row not yet created
         return cell
 
     ws = _mock_worksheet()
@@ -109,8 +110,8 @@ async def test_log_email_capture_retries_until_row_exists():
     assert call_count["n"] == 2
 
 
-async def test_log_email_capture_retries_on_sheets_api_error(caplog):
-    """Transient API error must not silently drop the email — must continue retrying."""
+async def test_log_email_capture_retries_on_sheets_api_error():
+    """Transient Sheets API error must not silently drop the email — must continue retrying."""
     call_count = {"n": 0}
     cell = MagicMock()
     cell.row = 7
@@ -131,3 +132,13 @@ async def test_log_email_capture_retries_on_sheets_api_error(caplog):
 
     ws.update_cell.assert_called_once_with(7, 4, "transient@example.com")
     assert call_count["n"] == 2
+
+
+async def test_log_email_capture_skips_empty_call_id(caplog):
+    """Empty call_id must not call find() — it would match blank cells and corrupt random rows."""
+    ws = _mock_worksheet()
+    with patch("webhook.crm._get_worksheet", return_value=ws):
+        from webhook.crm import log_email_capture
+        await log_email_capture("", "ghost@example.com", "newsletter")
+    ws.find.assert_not_called()
+    assert "call_id is empty" in caplog.text

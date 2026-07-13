@@ -43,6 +43,9 @@ def send_booking_sms(phone_number: str) -> bool:
     _init_client()
 
     booking_url = os.environ.get("BOOKING_URL", "")
+    if not booking_url:
+        logger.error("BOOKING_URL is not set — SMS would contain no link. Aborting.")
+        return False
     from_number = os.environ.get("TWILIO_FROM_NUMBER", "")  # read at call time
     sms_body = (
         f"Hi! Here's your link to book a free 30-minute strategy call with "

@@ -59,6 +59,15 @@ def test_invalid_phone_number_returns_false_without_calling_twilio():
     mock_client.messages.create.assert_not_called()
 
 
+def test_send_returns_false_when_booking_url_not_set(monkeypatch):
+    """If BOOKING_URL is missing, must not send an SMS with an empty link."""
+    monkeypatch.setenv("BOOKING_URL", "")
+    with patch("webhook.sms.twilio_client") as mock_client:
+        result = send_booking_sms("+15551234567")
+    assert result is False
+    mock_client.messages.create.assert_not_called()
+
+
 def test_sms_retries_once_on_transient_failure():
     """First Twilio attempt fails; second attempt succeeds. Returns True."""
     mock_msg = MagicMock()

@@ -116,10 +116,14 @@ async def _process_end_of_call(msg: VapiMessage) -> None:
     from webhook.crm import log_call_to_sheets
     from webhook.notifications import notify_warm_lead
 
-    qualification = qualify_call(
-        transcript=msg.transcript or "",
-        summary=msg.summary or "",
-    )
+    try:
+        qualification = qualify_call(
+            transcript=msg.transcript or "",
+            summary=msg.summary or "",
+        )
+    except Exception as e:
+        logger.error("qualify_call failed for call %s: %s", msg.call.id if msg.call else "unknown", e)
+        return
     await log_call_to_sheets(msg, qualification)
     if qualification["is_warm_lead"]:
         await notify_warm_lead(msg, qualification)
