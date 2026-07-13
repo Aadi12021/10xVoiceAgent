@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 import time
 from typing import Any
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -12,26 +13,27 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 app = FastAPI(title="10X AI Studio Voice Agent Webhook")
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 def _verify_secret(request: Request) -> None:
-    # Read at request time so monkeypatched env vars work in tests
     secret = os.environ.get("WEBHOOK_SECRET", "")
+    if not secret:
+        # Fail closed: if WEBHOOK_SECRET is unset, reject all requests to prevent
+        # an open webhook that anyone can POST to.
+        raise HTTPException(status_code=500, detail="Server misconfiguration: WEBHOOK_SECRET not set")
     if request.headers.get("x-vapi-secret", "") != secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
-    # Replay protection: reject requests with a timestamp older than 5 minutes.
-    # Vapi sends x-vapi-timestamp (Unix epoch float). Skip check if header absent
-    # (older Vapi versions may omit it) to avoid breaking existing integrations.
     ts_header = request.headers.get("x-vapi-timestamp", "")
     if ts_header:
         try:
             if abs(time.time() - float(ts_header)) > 300:
                 raise HTTPException(status_code=401, detail="Webhook timestamp too old")
         except ValueError:
-            pass  # unparseable timestamp — skip replay check rather than reject
+            pass
 
 
 def _parse_fn_params(raw: Any) -> dict:
-    """Vapi sends function parameters as a JSON string or a parsed dict — handle both."""
     if isinstance(raw, str):
         try:
             return json.loads(raw)
@@ -58,7 +60,7 @@ async def handle_vapi_event(
     msg = payload.message
 
     if msg.type == "function-call":
-        return await _handle_function_call(msg)
+        return await _handle_function_call(msg, background_tasks)
 
     if msg.type == "end-of-call-report":
         background_tasks.add_task(_process_end_of_call, msg)
@@ -67,7 +69,7 @@ async def handle_vapi_event(
     return {"status": "ok"}
 
 
-async def _handle_function_call(msg: VapiMessage) -> dict:
+async def _handle_function_call(msg: VapiMessage, background_tasks: BackgroundTasks) -> dict:
     from webhook.sms import send_booking_sms
     from webhook.crm import log_email_capture
 
@@ -96,10 +98,21 @@ async def _handle_function_call(msg: VapiMessage) -> dict:
         ).model_dump()
 
     if fn.name == "capture_email":
-        email = params.get("email", "")
+        email = params.get("email", "").strip()
         purpose = params.get("purpose", "newsletter")
         call_id = msg.call.id if msg.call else ""
-        await log_email_capture(call_id=call_id, email=email, purpose=purpose)
+
+        if not _EMAIL_RE.match(email):
+            logger.warning("Invalid email format received: %r", email)
+            return FunctionCallResult(
+                result="I'm sorry, I didn't quite catch that. Could you spell out your email address for me?"
+            ).model_dump()
+
+        # Dispatch as background task — the Sheets row doesn't exist yet during the call
+        # (it's written by end-of-call-report after hang-up). Awaiting inline would block
+        # the Vapi response for up to 18 s while retries wait for the row to appear.
+        background_tasks.add_task(log_email_capture, call_id=call_id, email=email, purpose=purpose)
+
         if purpose == "newsletter":
             return FunctionCallResult(
                 result="Got it. The team will add you to The 10X Briefs. You will get your first issue within the next two weeks."

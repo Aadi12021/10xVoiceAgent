@@ -114,3 +114,37 @@ def test_vp_at_end_of_sentence_is_decision_maker():
     )
     assert result["is_warm_lead"] is True
     assert "decision_maker" in result["qualification_signals"]
+
+
+def test_inefficiency_noun_matches_pain_point():
+    """'inefficiency' (noun) must trigger pain_point signal.
+    Regression test: old regex stem 'inefficien' never matched full words due to word boundary.
+    """
+    result = qualify_call(
+        transcript="Caller: There's a huge inefficiency in our reporting process.",
+        summary="Caller has reporting inefficiency."
+    )
+    assert result["is_warm_lead"] is True
+    assert "pain_point" in result["qualification_signals"]
+
+
+def test_inefficient_adjective_matches_pain_point():
+    """'inefficient' (adjective) must trigger pain_point signal."""
+    result = qualify_call(
+        transcript="Caller: Our current workflow is really inefficient and costing us time.",
+        summary="Caller finds current workflow inefficient."
+    )
+    assert result["is_warm_lead"] is True
+    assert "pain_point" in result["qualification_signals"]
+
+
+def test_whats_the_investment_matches_pricing_inquiry():
+    """\"what's the investment\" must trigger pricing_inquiry signal.
+    Regression test: old regex 'what.s' (unescaped dot) matched 'whatXs' patterns but was fragile.
+    """
+    result = qualify_call(
+        transcript="Caller: What's the investment to get started with your program?",
+        summary="Caller asking about investment/pricing."
+    )
+    assert result["is_warm_lead"] is True
+    assert "pricing_inquiry" in result["qualification_signals"]

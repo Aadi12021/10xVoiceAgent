@@ -68,6 +68,21 @@ def test_send_returns_false_when_booking_url_not_set(monkeypatch):
     mock_client.messages.create.assert_not_called()
 
 
+def test_international_number_with_plus_prefix_not_prepended_with_1():
+    """A +E.164 number with 10 digits must NOT have +1 prepended.
+    Regression test: old normalization checked digit count before + prefix, turning
+    +9876543210 into +19876543210 (wrong country code).
+    """
+    mock_msg = MagicMock()
+    mock_msg.sid = "SM_INTL"
+    with patch("webhook.sms.twilio_client") as mock_client:
+        mock_client.messages.create.return_value = mock_msg
+        result = send_booking_sms("+9876543210")
+    assert result is True
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["to"] == "+9876543210"  # must not become +19876543210
+
+
 def test_sms_retries_once_on_transient_failure():
     """First Twilio attempt fails; second attempt succeeds. Returns True."""
     mock_msg = MagicMock()

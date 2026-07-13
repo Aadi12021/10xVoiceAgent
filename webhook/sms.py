@@ -4,9 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Lazily initialized on first use — avoids credential check at import time (which
-# would fail during test collection before conftest fixtures inject env vars).
-twilio_client = None
+twilio_client = None  # lazy init — avoids credential check at import time
 
 
 def _init_client():
@@ -23,13 +21,16 @@ def _normalize_phone(phone: str) -> str:
     """Normalize to E.164. Returns empty string if the number is not recognizably valid."""
     if not phone:
         return ""
+    # Check for explicit + prefix first — must not be overridden by the digit-count checks below.
+    # e.g. +9876543210 strips to 10 digits and would incorrectly hit the 10-digit → +1 branch.
+    if phone.startswith("+"):
+        digits = re.sub(r"\D", "", phone)
+        return f"+{digits}" if 7 <= len(digits) <= 15 else ""
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 10:
         return f"+1{digits}"
     if len(digits) == 11 and digits.startswith("1"):
         return f"+{digits}"
-    if phone.startswith("+") and 7 <= len(digits) <= 15:
-        return f"+{digits}"  # international — pass through if plausibly valid
     return ""
 
 
@@ -39,14 +40,14 @@ def send_booking_sms(phone_number: str) -> bool:
         logger.warning("Skipping SMS — invalid or empty phone number: %r", phone_number)
         return False
 
-    # Initialize client on first use; tests replace twilio_client via patch before this runs
-    _init_client()
-
     booking_url = os.environ.get("BOOKING_URL", "")
     if not booking_url:
         logger.error("BOOKING_URL is not set — SMS would contain no link. Aborting.")
         return False
-    from_number = os.environ.get("TWILIO_FROM_NUMBER", "")  # read at call time
+
+    _init_client()
+
+    from_number = os.environ.get("TWILIO_FROM_NUMBER", "")
     sms_body = (
         f"Hi! Here's your link to book a free 30-minute strategy call with "
         f"10X AI Studio: {booking_url} — We look forward to talking with you."

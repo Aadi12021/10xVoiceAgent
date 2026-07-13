@@ -6,18 +6,19 @@ from webhook.models import VapiMessage
 
 logger = logging.getLogger(__name__)
 
-# Lazy init — avoids credential error at import time before env vars are injected in tests
-_sheets_client = None
+_sheets_client = None   # lazy init — avoids credential error at import time
+_worksheet = None       # cached worksheet reference — avoids open_by_key() on every call
 
 _HEADERS = [
     "Call ID", "Call Date", "Phone", "Email",
     "Qualification", "Segment", "Summary",
     "Transcript", "Recording URL", "Ended Reason",
 ]
-_COL_CALL_ID = 1   # A
-_COL_EMAIL   = 4   # D  (must match _HEADERS order above)
+# Derived from _HEADERS so they stay correct if columns are reordered.
+_COL_CALL_ID = _HEADERS.index("Call ID") + 1   # 1-indexed for gspread
+_COL_EMAIL   = _HEADERS.index("Email") + 1
 
-_MAX_TRANSCRIPT_CHARS = 5000  # Google Sheets cell limit is ~50k chars, but keep it readable
+_MAX_TRANSCRIPT_CHARS = 5000
 
 
 def _init_client():
@@ -34,9 +35,12 @@ def _init_client():
 
 
 def _get_worksheet():
-    _init_client()
-    sheet = _sheets_client.open_by_key(os.environ.get("GOOGLE_SHEET_ID", ""))
-    return sheet.sheet1
+    global _worksheet
+    if _worksheet is None:
+        _init_client()
+        sheet = _sheets_client.open_by_key(os.environ.get("GOOGLE_SHEET_ID", ""))
+        _worksheet = sheet.sheet1
+    return _worksheet
 
 
 def _qualification_label(q: dict) -> str:
@@ -68,35 +72,47 @@ def _append_row_sync(msg: VapiMessage, qualification: dict) -> None:
         msg.endedReason or "",
     ]
     ws = _get_worksheet()
-    ws.append_row(row, value_input_option="USER_ENTERED")
+    # RAW prevents Google Sheets from interpreting cell values as formulas,
+    # which would execute arbitrary code if a caller dictates "=IMPORTDATA(...)".
+    ws.append_row(row, value_input_option="RAW")
 
 
 def _find_and_update_email_sync(call_id: str, email: str) -> bool:
-    """Find the row with this call_id and write the email. Returns True if found.
+    """Find the row for this call_id and write the email. Returns True if found.
 
-    gspread v6: find() returns None when not found (does not raise CellNotFound).
+    gspread v6: find() returns None when not found (does not raise).
+    Uses RAW input to prevent formula injection.
     """
     ws = _get_worksheet()
     cell = ws.find(call_id, in_column=_COL_CALL_ID)
     if cell is None:
         return False
-    ws.update_cell(cell.row, _COL_EMAIL, email)
+    # update() with RAW prevents formula injection from caller-provided email values
+    col_letter = chr(ord("A") + _COL_EMAIL - 1)
+    ws.update(f"{col_letter}{cell.row}", [[email]], value_input_option="RAW")
     return True
 
 
 async def log_call_to_sheets(msg: VapiMessage, qualification: dict) -> None:
-    try:
-        await asyncio.to_thread(_append_row_sync, msg, qualification)
-        logger.info("Call %s logged to Google Sheets", msg.call.id if msg.call else "unknown")
-    except Exception as e:
-        logger.error("Failed to log call to Google Sheets: %s", e)
+    for attempt in range(3):
+        try:
+            await asyncio.to_thread(_append_row_sync, msg, qualification)
+            logger.info("Call %s logged to Google Sheets", msg.call.id if msg.call else "unknown")
+            return
+        except Exception as e:
+            if attempt < 2:
+                wait = 2 ** attempt * 2  # 2s, 4s
+                logger.warning("Sheets write failed (attempt %d/3): %s — retrying in %ds", attempt + 1, e, wait)
+                await asyncio.sleep(wait)
+            else:
+                logger.error("Failed to log call to Google Sheets after 3 attempts: %s", e)
 
 
 async def log_email_capture(call_id: str, email: str, purpose: str) -> None:
     """Write the caller's email into the row for this call_id.
 
-    Retries up to 4 times with linear backoff because capture_email fires during the call
-    while the row isn't written until end-of-call-report fires after hang-up.
+    Must run as a background task — the row is written by end-of-call-report
+    which fires after hang-up, while capture_email fires during the call.
     """
     if not email:
         return

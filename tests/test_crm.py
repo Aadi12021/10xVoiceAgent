@@ -28,7 +28,7 @@ def _mock_worksheet():
     ws = MagicMock()
     ws.append_row = MagicMock()
     ws.find = MagicMock(return_value=None)  # gspread v6: find() returns None when not found
-    ws.update_cell = MagicMock()
+    ws.update = MagicMock()
     return ws
 
 
@@ -47,7 +47,8 @@ async def test_log_call_appends_row_to_sheet():
 
 
 async def test_log_call_handles_sheets_error_without_raising(caplog):
-    with patch("webhook.crm._get_worksheet", side_effect=Exception("Sheets down")):
+    with patch("webhook.crm._get_worksheet", side_effect=Exception("Sheets down")), \
+         patch("asyncio.sleep", new=AsyncMock()):
         from webhook.crm import log_call_to_sheets
         await log_call_to_sheets(SAMPLE_MSG, SAMPLE_Q)
     assert "Failed to log call" in caplog.text
@@ -81,7 +82,7 @@ async def test_log_email_capture_updates_existing_row():
         await log_email_capture("call-abc-123", "test@example.com", "newsletter")
 
     ws.find.assert_called_once_with("call-abc-123", in_column=1)
-    ws.update_cell.assert_called_once_with(3, 4, "test@example.com")
+    ws.update.assert_called_once_with("D3", [["test@example.com"]], value_input_option="RAW")
 
 
 async def test_log_email_capture_retries_until_row_exists():
@@ -106,7 +107,7 @@ async def test_log_email_capture_retries_until_row_exists():
         from webhook.crm import log_email_capture
         await log_email_capture("call-race", "retry@example.com", "newsletter")
 
-    ws.update_cell.assert_called_once_with(5, 4, "retry@example.com")
+    ws.update.assert_called_once_with("D5", [["retry@example.com"]], value_input_option="RAW")
     assert call_count["n"] == 2
 
 
@@ -130,7 +131,7 @@ async def test_log_email_capture_retries_on_sheets_api_error():
         from webhook.crm import log_email_capture
         await log_email_capture("call-transient", "transient@example.com", "newsletter")
 
-    ws.update_cell.assert_called_once_with(7, 4, "transient@example.com")
+    ws.update.assert_called_once_with("D7", [["transient@example.com"]], value_input_option="RAW")
     assert call_count["n"] == 2
 
 

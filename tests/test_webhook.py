@@ -24,8 +24,19 @@ def test_webhook_rejects_wrong_secret():
     assert resp.status_code == 401
 
 
+def test_webhook_returns_500_when_secret_not_configured(monkeypatch):
+    """If WEBHOOK_SECRET is unset the server must fail closed, not accept all requests."""
+    monkeypatch.setenv("WEBHOOK_SECRET", "")
+    resp = client.post(
+        "/webhook",
+        json={"message": {"type": "status-update"}},
+        headers={"x-vapi-secret": ""},
+    )
+    assert resp.status_code == 500
+
+
 def test_webhook_rejects_stale_timestamp():
-    old_ts = str(time.time() - 400)  # 400 seconds ago — outside 5-minute replay window
+    old_ts = str(time.time() - 400)
     resp = client.post(
         "/webhook",
         json={"message": {"type": "status-update", "status": "in-progress"}},
@@ -69,7 +80,6 @@ def test_function_call_event_sends_sms_and_returns_result():
 
 
 def test_function_call_parameters_as_dict_also_works():
-    """Vapi may send parameters as a parsed dict rather than a JSON string."""
     payload = {
         "message": {
             "type": "function-call",
@@ -95,7 +105,7 @@ def test_function_call_parameters_as_dict_also_works():
 
 
 def test_capture_email_newsletter_handler():
-    """capture_email with purpose=newsletter returns the 10X Briefs confirmation."""
+    """capture_email dispatches email storage as background task and returns immediately."""
     payload = {
         "message": {
             "type": "function-call",
@@ -106,30 +116,44 @@ def test_capture_email_newsletter_handler():
             "call": {"id": "call-email-test"},
         }
     }
-    mock_ws = MagicMock()
-    cell = MagicMock()
-    cell.row = 2
-    mock_ws.find.return_value = cell
-    with patch("webhook.crm._get_worksheet", return_value=mock_ws):
-        resp = client.post(
-            "/webhook",
-            json=payload,
-            headers={"x-vapi-secret": "testsecret"},
-        )
+    resp = client.post(
+        "/webhook",
+        json=payload,
+        headers={"x-vapi-secret": "testsecret"},
+    )
     assert resp.status_code == 200
     assert "10x briefs" in resp.json()["result"].lower()
 
 
+def test_capture_email_rejects_invalid_email_format():
+    """Malformed email from Vapi must prompt re-ask, not get stored."""
+    payload = {
+        "message": {
+            "type": "function-call",
+            "functionCall": {
+                "name": "capture_email",
+                "parameters": {"email": "not-an-email", "purpose": "newsletter"},
+            },
+            "call": {"id": "call-bad-email"},
+        }
+    }
+    resp = client.post(
+        "/webhook",
+        json=payload,
+        headers={"x-vapi-secret": "testsecret"},
+    )
+    assert resp.status_code == 200
+    assert "spell out" in resp.json()["result"].lower() or "didn't quite catch" in resp.json()["result"].lower()
+
+
 def test_send_booking_link_no_phone_returns_escalation():
-    """send_booking_link with no phone in params AND no call.customer returns graceful fallback."""
     payload = {
         "message": {
             "type": "function-call",
             "functionCall": {
                 "name": "send_booking_link",
-                "parameters": {},  # no phone_number key
+                "parameters": {},
             },
-            # no customer number
             "call": {"id": "call-no-phone"},
         }
     }
@@ -144,7 +168,6 @@ def test_send_booking_link_no_phone_returns_escalation():
 
 
 def test_malformed_json_parameters_handled_gracefully():
-    """Vapi sending malformed JSON in parameters must not cause a 500 error."""
     payload = {
         "message": {
             "type": "function-call",
@@ -162,7 +185,6 @@ def test_malformed_json_parameters_handled_gracefully():
             json=payload,
             headers={"x-vapi-secret": "testsecret"},
         )
-    # Falls back to call.customer.number — should still send SMS successfully
     assert resp.status_code == 200
     assert "sent you a text" in resp.json()["result"].lower()
 
